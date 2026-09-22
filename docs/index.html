@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seattle Tree Canopy Change (Demo)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #ffffff; --ink: #1a1a1a; --muted: #5b5f66; --border: #e2e4e8;
+    --surface: #f6f7f9; --accent: #2a7d4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1117; --ink: #e6e8eb; --muted: #9aa1ab; --border: #2a2e35;
+      --surface: #161a21; --accent: #4fbf82;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header { padding: 16px clamp(16px, 4vw, 32px) 0; }
+  h1 { margin: 0 0 4px; font-size: 1.4rem; }
+  .caption { color: var(--muted); margin: 0 0 12px; font-size: 0.9rem; }
+  .tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--border); padding: 0 clamp(16px, 4vw, 32px); }
+  .tab-btn { background: none; border: none; padding: 10px 0; font-size: 15px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  #tab-map { flex: 1 1 auto; min-height: 0; display: none; position: relative; }
+  #tab-map.active { display: block; }
+  #map { height: 100%; width: 100%; }
+  #tab-about { display: none; padding: 16px clamp(16px, 4vw, 32px) 48px; overflow-y: auto; }
+  #tab-about.active { display: block; }
+  .controls {
+    position: absolute; top: 12px; right: 12px; z-index: 1000; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 13px;
+    max-width: 250px; max-height: calc(100% - 24px); overflow-y: auto;
+  }
+  .controls label { display: block; margin: 4px 0; }
+  .layer-row { margin: 8px 0; }
+  .layer-row label { display: block; margin: 0 0 2px; }
+  .opacity-slider { width: 100%; accent-color: var(--accent); }
+  .load-hint { font-size: 11px; color: var(--muted); margin: 0 0 4px; }
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .legend { margin-top: 10px; }
+  .legend-bar { height: 10px; border-radius: 3px; background: linear-gradient(to right, #a50f15, #fff5eb, #1a7a3a); }
+  .legend-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  code { background: var(--surface); padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+  a { color: var(--accent); }
+  .inspect-popup { font-size: 12.5px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Seattle Tree Canopy Change (Demo)</h1>
+    <p class="caption">Citywide tree canopy, 2013 vs 2023, derived from real NAIP aerial imagery - see the About tab before drawing any conclusions from it.</p>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="map">Map</button>
+      <button class="tab-btn" data-tab="about">About</button>
+    </div>
+  </header>
+
+  <div id="tab-map" class="active">
+    <div id="map"></div>
+    <div class="controls">
+      <strong>Canopy change</strong>
+      <div class="layer-row">
+        <label><input type="checkbox" id="toggle-choropleth" checked> Neighborhood change</label>
+        <input type="range" class="opacity-slider" id="opacity-choropleth" min="0" max="100" value="70">
+      </div>
+      <div class="legend">
+        <div class="legend-bar"></div>
+        <div class="legend-labels"><span>Lost canopy</span><span>Gained canopy</span></div>
+      </div>
+      <hr class="sep">
+      <strong>Real satellite imagery</strong>
+      <div class="load-hint">Streamed on demand from cloud storage - only the visible area is fetched, not the full ~45MB file.</div>
+      <div class="layer-row">
+        <label><input type="checkbox" id="toggle-naip-2013"> NAIP 2013</label>
+        <input type="range" class="opacity-slider" id="opacity-naip-2013" min="0" max="100" value="100">
+      </div>
+      <div class="layer-row">
+        <label><input type="checkbox" id="toggle-naip-2023"> NAIP 2023</label>
+        <input type="range" class="opacity-slider" id="opacity-naip-2023" min="0" max="100" value="100">
+      </div>
+      <div class="load-hint">Turn both on and slide their opacity to compare the same spot across the decade.</div>
+      <hr class="sep">
+      <label><input type="checkbox" id="toggle-basemap" checked> Basemap</label>
+      <div class="load-hint" id="loading-status"></div>
+    </div>
+  </div>
+
+  <div id="tab-about">
+    <h2>What this is</h2>
+    <p>An independent estimate of how Seattle's tree canopy changed between
+    2013 and 2023, derived from real NAIP aerial imagery (not from an
+    official canopy dataset - King County's own tree canopy layer only
+    covers a single year, 2021, so there's nothing to directly diff). This
+    demo computes canopy from raw 4-band NAIP imagery for both dates using
+    the exact same method, then compares.</p>
+
+    <p><strong>Finding:</strong> citywide tree canopy fell from an
+    estimated 28.0% (2013) to 24.4% (2023) - a 3.6 percentage point loss
+    over the decade, concentrated in the Central District / Capitol Hill /
+    First Hill corridor, which saw substantial infill development and
+    upzoning over that period.</p>
+
+    <h2>Reading the map</h2>
+    <p>The <strong>neighborhood change</strong> layer colors each of
+    Seattle's 53 official Community Reporting Areas by canopy change (red
+    = lost canopy, green = gained) - click any neighborhood for its exact
+    2013%, 2023%, and change. The <strong>NAIP 2013 / NAIP 2023</strong>
+    toggles load the actual aerial photos for each date (not loaded by
+    default - each is about 45MB) so you can visually inspect where
+    canopy actually disappeared, not just trust a color-coded number.
+    Turn both on and slide their opacity to compare the same spot across
+    the decade.</p>
+
+    <p>The two aerial images are hosted as Cloud-Optimized GeoTIFFs on
+    <a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank" rel="noopener">Cloudflare R2</a>
+    rather than committed to this repo. The page streams them directly via
+    HTTP range requests, so toggling a year only pulls the tiles for
+    whatever you're currently looking at instead of downloading the full
+    ~45MB file.</p>
+
+    <h2>Method, briefly (full detail + real data problems hit along the way in the notebook)</h2>
+    <p>NDVI computed from NAIP's red and near-infrared bands, both years,
+    aligned to one identical pixel grid (the two NAIP dates have different
+    native resolutions - 1m in 2013, 0.6m in 2023 - so they don't align by
+    default). A real systematic radiometric offset between the two
+    acquisitions (different processing years apart) meant a single fixed
+    NDVI threshold didn't work across both dates - fixed with per-year
+    z-score normalization, with the canopy cutoff itself calibrated once
+    against Seattle's own published ~28% citywide canopy figure.</p>
+
+    <h2>Honest caveats</h2>
+    <ul>
+      <li>The canopy threshold is calibrated against a published external
+      reference, not an absolute physical measurement - see the notebook
+      for exactly how and why.</li>
+      <li>5m analysis resolution (decimated from NAIP's native 0.6-1m) -
+      fine for neighborhood-level change, not individual trees.</li>
+      <li>Seattle only, not all of King County.</li>
+      <li>Not an official assessment - see Seattle's own published
+      2016-2021 canopy study (cited in the notebook) for that.</li>
+    </ul>
+
+    <h2>Data sources</h2>
+    <ul>
+      <li><a href="https://naip-usdaonline.hub.arcgis.com/" target="_blank" rel="noopener">NAIP aerial imagery</a> (USDA), accessed via <a href="https://planetarycomputer.microsoft.com/" target="_blank" rel="noopener">Microsoft Planetary Computer</a></li>
+      <li><a href="https://data-seattlecitygis.opendata.arcgis.com/datasets/SeattleCityGIS::community-reporting-areas-3/about" target="_blank" rel="noopener">Seattle Community Reporting Areas</a> - neighborhood boundaries</li>
+      <li><a href="https://gis-kingcounty.opendata.arcgis.com/datasets/kingcounty::king-county-with-natural-shoreline-for-puget-sound-and-lake-washington" target="_blank" rel="noopener">King County natural shoreline boundary</a></li>
+      <li><a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9" target="_blank" rel="noopener">Esri World Imagery</a> (basemap only, for orientation - not part of the analysis)</li>
+      <li><a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank" rel="noopener">Cloudflare R2</a> - hosts the two NAIP COGs, streamed via HTTP range requests</li>
+      <li><a href="../notebooks/tree_canopy_change.ipynb" target="_blank" rel="noopener">Full analysis notebook</a> on GitHub</li>
+      <li><a href="https://github.com/crikeli/seattle-tree-canopy-change" target="_blank" rel="noopener">Source code on GitHub</a></li>
+    </ul>
+    </div>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
+<script>
+  document.querySelectorAll(".tab-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll("#tab-map, #tab-about").forEach(function (p) { p.classList.remove("active"); });
+      btn.classList.add("active");
+      document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      if (btn.dataset.tab === "map") { setTimeout(function () { map.invalidateSize(); }, 50); }
+    });
+  });
+
+  const CENTER = [47.6148401401413, -122.335984973307];
+  const map = L.map("map", { zoomSnap: 0.25 }).setView(CENTER, 12);
+  L.control.scale({ metric: true, imperial: true }).addTo(map);
+
+  const basemapLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 19,
+    attribution: "Imagery &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+  }).addTo(map);
+
+  const labelsLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 19,
+    attribution: "Labels &copy; Esri",
+  }).addTo(map);
+
+  function changeColor(v) {
+    if (v === null || v === undefined || isNaN(v)) return "#999";
+    const t = Math.max(-1, Math.min(1, v / 12));  // +-12 pct pts full-scale
+    if (t < 0) {
+      const k = -t;
+      const rgb = [255, 245, 235].map(function (c, i) { return Math.round([255,245,235][i] + k * ([165,15,21][i]-[255,245,235][i])); });
+      return "rgb(" + rgb.join(",") + ")";
+    } else {
+      const k = t;
+      const rgb = [255, 245, 235].map(function (c, i) { return Math.round([255,245,235][i] + k * ([26,122,58][i]-[255,245,235][i])); });
+      return "rgb(" + rgb.join(",") + ")";
+    }
+  }
+
+  const NAIP_URLS = {"2013": "https://pub-9495da6a1be145f783195fe7de35a6f3.r2.dev/naip_2013.tif", "2023": "https://pub-9495da6a1be145f783195fe7de35a6f3.r2.dev/naip_2023.tif"};
+
+  let choroplethLayer, naip2013Layer, naip2023Layer;
+  let choroplethOpacity = 0.7, naip2013Opacity = 1.0, naip2023Opacity = 1.0;
+
+  fetch("canopy_change.geojson").then(function (r) { return r.json(); }).then(function (gj) {
+    choroplethLayer = L.geoJSON(gj, {
+      style: function (feature) {
+        return {
+          fillColor: changeColor(feature.properties.change_pct_pts),
+          fillOpacity: choroplethOpacity, color: "#333", weight: 1,
+        };
+      },
+      onEachFeature: function (feature, layer) {
+        const p = feature.properties;
+        const rows = [
+          "<b>" + (p.name || "Unnamed area") + "</b>",
+          p.canopy_pct_2013 != null ? "2013 canopy: " + p.canopy_pct_2013 + "%" : null,
+          p.canopy_pct_2023 != null ? "2023 canopy: " + p.canopy_pct_2023 + "%" : null,
+          p.change_pct_pts != null ? "Change: " + (p.change_pct_pts > 0 ? "+" : "") + p.change_pct_pts + " pct pts" : "Not enough land area to report",
+        ].filter(Boolean).join("<br>");
+        layer.bindPopup("<div class=\"inspect-popup\">" + rows + "</div>");
+      },
+    });
+    if (document.getElementById("toggle-choropleth").checked) choroplethLayer.addTo(map);
+  });
+
+  function loadNaip(year, opacityGetter) {
+    document.getElementById("loading-status").textContent = "Loading NAIP " + year + "...";
+    return parseGeoraster(NAIP_URLS[year]).then(function (georaster) {
+        document.getElementById("loading-status").textContent = "";
+        const layer = new GeoRasterLayer({
+          georaster: georaster, opacity: opacityGetter(), resolution: 256,
+          pixelValuesToColorFn: function (values) {
+            const r = values[0], g = values[1], b = values[2];
+            if (r === null || (r === 0 && g === 0 && b === 0)) return null;
+            return "rgb(" + r + "," + g + "," + b + ")";
+          },
+        });
+        layer.addTo(map);
+        labelsLayer.bringToFront();
+        return layer;
+      });
+  }
+
+  document.getElementById("toggle-naip-2013").addEventListener("change", function (e) {
+    if (e.target.checked) {
+      if (naip2013Layer) { naip2013Layer.addTo(map); labelsLayer.bringToFront(); }
+      else { loadNaip(2013, function () { return naip2013Opacity; }).then(function (l) { naip2013Layer = l; }); }
+    } else if (naip2013Layer) { map.removeLayer(naip2013Layer); }
+  });
+  document.getElementById("toggle-naip-2023").addEventListener("change", function (e) {
+    if (e.target.checked) {
+      if (naip2023Layer) { naip2023Layer.addTo(map); labelsLayer.bringToFront(); }
+      else { loadNaip(2023, function () { return naip2023Opacity; }).then(function (l) { naip2023Layer = l; }); }
+    } else if (naip2023Layer) { map.removeLayer(naip2023Layer); }
+  });
+  document.getElementById("opacity-naip-2013").addEventListener("input", function (e) {
+    naip2013Opacity = e.target.value / 100;
+    if (naip2013Layer) naip2013Layer.setOpacity(naip2013Opacity);
+  });
+  document.getElementById("opacity-naip-2023").addEventListener("input", function (e) {
+    naip2023Opacity = e.target.value / 100;
+    if (naip2023Layer) naip2023Layer.setOpacity(naip2023Opacity);
+  });
+
+  document.getElementById("toggle-choropleth").addEventListener("change", function (e) {
+    if (choroplethLayer) { e.target.checked ? choroplethLayer.addTo(map) : map.removeLayer(choroplethLayer); }
+  });
+  document.getElementById("opacity-choropleth").addEventListener("input", function (e) {
+    choroplethOpacity = e.target.value / 100;
+    if (choroplethLayer) choroplethLayer.setStyle({ fillOpacity: choroplethOpacity });
+  });
+  document.getElementById("toggle-basemap").addEventListener("change", function (e) {
+    if (e.target.checked) { basemapLayer.addTo(map); basemapLayer.bringToBack(); }
+    else { map.removeLayer(basemapLayer); }
+  });
+</script>
+</body>
+</html>

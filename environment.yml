@@ -1,0 +1,20 @@
+name: seattle-tree-canopy-change
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - jupyterlab
+  - pandas
+  - geopandas
+  - numpy
+  - shapely
+  - matplotlib
+  - requests
+  - pyarrow
+  - rasterio
+  - rioxarray
+  - xarray
+  - pystac-client
+  - planetary-computer
+  - rio-cogeo
+  - pip
