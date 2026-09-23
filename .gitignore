@@ -1,4 +1,5 @@
 docs/cogs/
+data/tiles/
 *.tif
 *.tif.aux.xml
 .DS_Store

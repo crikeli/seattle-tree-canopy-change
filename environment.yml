@@ -18,3 +18,5 @@ dependencies:
   - planetary-computer
   - rio-cogeo
   - pip
+  - pip:
+      - rio-tiler

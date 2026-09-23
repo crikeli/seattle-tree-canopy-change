@@ -1,15 +1,17 @@
 """
 Builds the published static site (docs/index.html) from the notebook's
 outputs: docs/canopy_change.geojson (per-neighborhood canopy % + change)
-and the two NAIP true-color COGs, hosted on Cloudflare R2 (see NAIP_URLS
-below) rather than committed to the repo.
+and a pre-rendered WebP tile pyramid for each NAIP year (built by
+data/build_tiles.py), hosted on Cloudflare R2 rather than committed to
+the repo.
 
-The two NAIP COGs (~43-45MB each) are NOT fetched on page load. Each is
-streamed client-side via parseGeoraster(url) (georaster-layer-for-leaflet,
-no tile server) only when its checkbox is first switched on - and because
-they're real Cloud-Optimized GeoTIFFs served from R2 (which supports HTTP
-Range requests), the browser only pulls the overview level and tiles
-needed for the current view, not the whole file.
+Earlier version of this site streamed the raw COGs client-side via
+georaster-layer-for-leaflet, which decodes and reprojects pixels in pure
+JS on the main thread - the real source of the toggle lag, not the
+network. Pre-rendering a standard XYZ tile pyramid (see build_tiles.py)
+and loading it with a plain L.tileLayer removes that entirely: the
+browser just requests small, independently-cacheable image tiles the
+same way it does for the basemap.
 
 Usage:
     python build_static_site.py
@@ -22,9 +24,15 @@ DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(os.path.dirname(DATA_DIR), "docs")
 GEOJSON_PATH = os.path.join(DOCS_DIR, "canopy_change.geojson")
 
-NAIP_URLS = {
-    2013: "https://pub-9495da6a1be145f783195fe7de35a6f3.r2.dev/naip_2013.tif",
-    2023: "https://pub-9495da6a1be145f783195fe7de35a6f3.r2.dev/naip_2023.tif",
+NAIP_TILE_BASE = "https://pub-9495da6a1be145f783195fe7de35a6f3.r2.dev/tiles"
+NAIP_YEARS = [2013, 2023]
+NAIP_MIN_ZOOM = 10
+NAIP_MAX_NATIVE_ZOOM = 15  # one level past native (5m) resolution
+NAIP_BOUNDS = {
+    "south": 47.49530737922766,
+    "west": -122.43773151453304,
+    "north": 47.73467722781303,
+    "east": -122.23272749296285,
 }
 
 PAGE_TEMPLATE = """<!doctype html>
@@ -105,7 +113,7 @@ PAGE_TEMPLATE = """<!doctype html>
       </div>
       <hr class="sep">
       <strong>Real satellite imagery</strong>
-      <div class="load-hint">Streamed on demand from cloud storage - only the visible area is fetched, not the full ~45MB file.</div>
+      <div class="load-hint">Pre-rendered map tiles - loads instantly like a basemap, no big file fetch.</div>
       <div class="layer-row">
         <label><input type="checkbox" id="toggle-naip-2013"> NAIP 2013</label>
         <input type="range" class="opacity-slider" id="opacity-naip-2013" min="0" max="100" value="100">
@@ -117,15 +125,12 @@ PAGE_TEMPLATE = """<!doctype html>
       <div class="load-hint">Turn both on and slide their opacity to compare the same spot across the decade.</div>
       <hr class="sep">
       <label><input type="checkbox" id="toggle-basemap" checked> Basemap</label>
-      <div class="load-hint" id="loading-status"></div>
     </div>
   </div>
 
   <div id="tab-about">{about_html}</div>
 
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/georaster-layer-for-leaflet@3.10.0/dist/georaster-layer-for-leaflet.min.js"></script>
 <script>
   document.querySelectorAll(".tab-btn").forEach(function (btn) {{
     btn.addEventListener("click", function () {{
@@ -165,7 +170,11 @@ PAGE_TEMPLATE = """<!doctype html>
     }}
   }}
 
-  const NAIP_URLS = {naip_urls_json};
+  const NAIP_TILE_BASE = {naip_tile_base_json};
+  const NAIP_BOUNDS = L.latLngBounds(
+    [{naip_south}, {naip_west}],
+    [{naip_north}, {naip_east}]
+  );
 
   let choroplethLayer, naip2013Layer, naip2023Layer;
   let choroplethOpacity = 0.7, naip2013Opacity = 1.0, naip2023Opacity = 1.0;
@@ -192,34 +201,25 @@ PAGE_TEMPLATE = """<!doctype html>
     if (document.getElementById("toggle-choropleth").checked) choroplethLayer.addTo(map);
   }});
 
-  function loadNaip(year, opacityGetter) {{
-    document.getElementById("loading-status").textContent = "Loading NAIP " + year + "...";
-    return parseGeoraster(NAIP_URLS[year]).then(function (georaster) {{
-        document.getElementById("loading-status").textContent = "";
-        const layer = new GeoRasterLayer({{
-          georaster: georaster, opacity: opacityGetter(), resolution: 256,
-          pixelValuesToColorFn: function (values) {{
-            const r = values[0], g = values[1], b = values[2];
-            if (r === null || (r === 0 && g === 0 && b === 0)) return null;
-            return "rgb(" + r + "," + g + "," + b + ")";
-          }},
-        }});
-        layer.addTo(map);
-        labelsLayer.bringToFront();
-        return layer;
-      }});
+  function makeNaipLayer(year, opacity) {{
+    return L.tileLayer(NAIP_TILE_BASE + "/" + year + "/{{z}}/{{x}}/{{y}}.webp", {{
+      bounds: NAIP_BOUNDS, minZoom: {naip_min_zoom}, maxZoom: 19, maxNativeZoom: {naip_max_native_zoom},
+      opacity: opacity,
+    }});
   }}
 
   document.getElementById("toggle-naip-2013").addEventListener("change", function (e) {{
     if (e.target.checked) {{
-      if (naip2013Layer) {{ naip2013Layer.addTo(map); labelsLayer.bringToFront(); }}
-      else {{ loadNaip(2013, function () {{ return naip2013Opacity; }}).then(function (l) {{ naip2013Layer = l; }}); }}
+      if (!naip2013Layer) naip2013Layer = makeNaipLayer(2013, naip2013Opacity);
+      naip2013Layer.addTo(map);
+      labelsLayer.bringToFront();
     }} else if (naip2013Layer) {{ map.removeLayer(naip2013Layer); }}
   }});
   document.getElementById("toggle-naip-2023").addEventListener("change", function (e) {{
     if (e.target.checked) {{
-      if (naip2023Layer) {{ naip2023Layer.addTo(map); labelsLayer.bringToFront(); }}
-      else {{ loadNaip(2023, function () {{ return naip2023Opacity; }}).then(function (l) {{ naip2023Layer = l; }}); }}
+      if (!naip2023Layer) naip2023Layer = makeNaipLayer(2023, naip2023Opacity);
+      naip2023Layer.addTo(map);
+      labelsLayer.bringToFront();
     }} else if (naip2023Layer) {{ map.removeLayer(naip2023Layer); }}
   }});
   document.getElementById("opacity-naip-2013").addEventListener("input", function (e) {{
@@ -283,12 +283,15 @@ def main() -> None:
     Turn both on and slide their opacity to compare the same spot across
     the decade.</p>
 
-    <p>The two aerial images are hosted as Cloud-Optimized GeoTIFFs on
+    <p>The two aerial images are pre-rendered into standard map tiles
+    (not the raw ~45MB GeoTIFFs) and hosted on
     <a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank" rel="noopener">Cloudflare R2</a>
-    rather than committed to this repo. The page streams them directly via
-    HTTP range requests, so toggling a year only pulls the tiles for
-    whatever you're currently looking at instead of downloading the full
-    ~45MB file.</p>
+    rather than committed to this repo. An earlier version of this page
+    decoded the raw imagery in the browser on toggle, which was slow -
+    the browser had to do the pixel math itself. Pre-rendering the tiles
+    once, offline, means the page just loads small images the same way
+    it loads the basemap: instantly, and only for whatever you're
+    currently looking at.</p>
 
     <h2>Method, briefly (full detail + real data problems hit along the way in the notebook)</h2>
     <p>NDVI computed from NAIP's red and near-infrared bands, both years,
@@ -318,14 +321,23 @@ def main() -> None:
       <li><a href="https://data-seattlecitygis.opendata.arcgis.com/datasets/SeattleCityGIS::community-reporting-areas-3/about" target="_blank" rel="noopener">Seattle Community Reporting Areas</a> - neighborhood boundaries</li>
       <li><a href="https://gis-kingcounty.opendata.arcgis.com/datasets/kingcounty::king-county-with-natural-shoreline-for-puget-sound-and-lake-washington" target="_blank" rel="noopener">King County natural shoreline boundary</a></li>
       <li><a href="https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9" target="_blank" rel="noopener">Esri World Imagery</a> (basemap only, for orientation - not part of the analysis)</li>
-      <li><a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank" rel="noopener">Cloudflare R2</a> - hosts the two NAIP COGs, streamed via HTTP range requests</li>
+      <li><a href="https://www.cloudflare.com/developer-platform/products/r2/" target="_blank" rel="noopener">Cloudflare R2</a> - hosts the pre-rendered NAIP tile pyramid</li>
       <li><a href="../notebooks/tree_canopy_change.ipynb" target="_blank" rel="noopener">Full analysis notebook</a> on GitHub</li>
       <li><a href="https://github.com/crikeli/seattle-tree-canopy-change" target="_blank" rel="noopener">Source code on GitHub</a></li>
     </ul>
     """
 
-    naip_urls_json = json.dumps({str(k): v for k, v in NAIP_URLS.items()})
-    page = PAGE_TEMPLATE.format(about_html=about_html, center_json=json.dumps(center), naip_urls_json=naip_urls_json)
+    page = PAGE_TEMPLATE.format(
+        about_html=about_html,
+        center_json=json.dumps(center),
+        naip_tile_base_json=json.dumps(NAIP_TILE_BASE),
+        naip_south=NAIP_BOUNDS["south"],
+        naip_west=NAIP_BOUNDS["west"],
+        naip_north=NAIP_BOUNDS["north"],
+        naip_east=NAIP_BOUNDS["east"],
+        naip_min_zoom=NAIP_MIN_ZOOM,
+        naip_max_native_zoom=NAIP_MAX_NATIVE_ZOOM,
+    )
     with open(os.path.join(DOCS_DIR, "index.html"), "w") as f:
         f.write(page)
     print(f"Wrote {os.path.join(DOCS_DIR, 'index.html')}")

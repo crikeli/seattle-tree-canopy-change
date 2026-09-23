@@ -53,12 +53,25 @@ NDVI.
 Beyond the per-neighborhood change map, the site lets you toggle the
 actual NAIP aerial photos for 2013 and 2023 on top of the map (with
 opacity sliders) to visually inspect where canopy loss happened, not just
-trust a color-coded number. The two COGs (~43-45MB each) are hosted on
+trust a color-coded number.
+
+**First version of this streamed the raw COGs client-side** via
+`georaster-layer-for-leaflet` (`parseGeoraster(url)` + HTTP range
+requests) - technically working, but visibly laggy on toggle, because
+that library decodes and reprojects every pixel in pure JS on the
+browser's main thread. The COG's own structure (512x512 internal tiling,
+3 overview levels) wasn't the bottleneck; the client-side raster math
+was.
+
+**Real fix:** `data/build_tiles.py` pre-renders each COG into a standard
+WebP XYZ tile pyramid (zoom 10-15, matching the data's actual 5m
+resolution plus one level for smooth zooming - under 2,000 tiles total,
+~22MB for both years combined, smaller than either original COG) using
+[rio-tiler](https://cogeotiff.github.io/rio-tiler/). The site then loads
+NAIP the exact same way it loads the Esri basemap - a plain Leaflet
+`L.tileLayer` - with zero client-side raster decoding. Both are hosted on
 [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/)
-rather than committed to this repo, and the page streams them via real
-HTTP range requests (`parseGeoraster(url)`, not a pre-fetched
-`arrayBuffer`) - toggling a year only pulls the tiles for whatever you're
-currently looking at, not the whole file.
+rather than committed to this repo.
 
 ## Repo layout
 
@@ -68,6 +81,7 @@ notebooks/
                               # alignment, radiometric fix, zonal stats, COG export
 data/
   build_static_site.py       # renders docs/index.html from the notebook's outputs
+  build_tiles.py              # pre-renders each COG into a WebP tile pyramid (rio-tiler)
   seattle_cra.geojson        # Seattle Community Reporting Area boundaries
   canopy_change_map.png      # sanity-check choropleth from the notebook
 docs/
@@ -76,9 +90,9 @@ docs/
 environment.yml
 ```
 
-The two NAIP COGs (`naip_2013.tif`, `naip_2023.tif`) are built by the
-notebook but not committed here - they're hosted on Cloudflare R2 (see
-above) and git-ignored locally.
+The two NAIP COGs (`naip_2013.tif`, `naip_2023.tif`) and the tile pyramid
+built from them (`data/tiles/`) are produced locally but not committed
+here - they're hosted on Cloudflare R2 (see above) and git-ignored.
 
 ## Setup
 
@@ -89,12 +103,17 @@ conda activate seattle-tree-canopy-change
 
 ```bash
 jupyter nbconvert --to notebook --execute --inplace notebooks/tree_canopy_change.ipynb
+python data/build_tiles.py
 python data/build_static_site.py
 ```
+
+Uploading the tile pyramid to R2 (after `build_tiles.py`) is a separate
+step - `aws s3 sync data/tiles s3://<bucket>/tiles --endpoint-url
+https://<account-id>.r2.cloudflarestorage.com`.
 
 ## Stack
 
 pystac-client + planetary-computer (NAIP access via STAC), rasterio,
-rioxarray, rio-cogeo, geopandas - Leaflet + georaster-layer-for-leaflet
-for the deployed static site, Esri World Imagery for basemap context,
-Cloudflare R2 for imagery hosting.
+rioxarray, rio-cogeo, rio-tiler, geopandas - Leaflet for the deployed
+static site (plain `L.tileLayer`, no client-side raster decoding), Esri
+World Imagery for basemap context, Cloudflare R2 for tile hosting.
